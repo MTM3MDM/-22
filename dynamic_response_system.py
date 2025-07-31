@@ -8,7 +8,7 @@ import asyncio
 import json
 import hashlib
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 import aiosqlite
 import logging
 
@@ -157,7 +157,7 @@ class DynamicResponseSystem:
         """질문 해시 생성"""
         return hashlib.md5(question.lower().strip().encode()).hexdigest()
     
-    async def check_recent_responses(self, user_id: str, question: str) -> Optional[Dict]:
+    async def check_recent_responses(self, user_id: str, question: str) -> Optional[Dict[str, Any]]:
         """최근 응답 기록 확인"""
         question_hash = self._get_question_hash(question)
         
@@ -181,11 +181,11 @@ class DynamicResponseSystem:
                             ]
                         }
             
-            return {'is_repeat': False, 'previous_responses': []}
+            return None # 반복되지 않은 경우 None 반환
             
         except Exception as e:
             logger.error(f"응답 기록 확인 오류: {e}")
-            return {'is_repeat': False, 'previous_responses': []}
+            return None
     
     def _choose_response_style(self, previous_styles: List[str]) -> str:
         """이전과 다른 응답 스타일 선택"""
@@ -243,13 +243,13 @@ class DynamicResponseSystem:
             # 최근 응답 기록 확인
             recent_check = await self.check_recent_responses(user_id, question)
             
+            repeat_intro: Optional[str] = None
+            previous_styles: List[str] = []
+
             # 반복 질문인지 확인
-            if recent_check['is_repeat'] and recent_check['previous_responses']:
+            if recent_check and recent_check.get('is_repeat') and recent_check.get('previous_responses'):
                 repeat_intro = random.choice(self.repeat_responses)
-                previous_styles = [resp['style'] for resp in recent_check['previous_responses']]
-            else:
-                repeat_intro = None
-                previous_styles = []
+                previous_styles = [resp.get('style', '') for resp in recent_check['previous_responses'] if isinstance(resp, dict)]
             
             # 새로운 스타일 선택
             response_style = self._choose_response_style(previous_styles)
@@ -259,12 +259,12 @@ class DynamicResponseSystem:
             base_response = random.choice(self.activity_responses[activity_category])
             
             # 기술 정보 추가 (10% 확률로 낮춤)
-            tech_info = None
+            tech_info: Optional[str] = None
             if random.random() < 0.1:
                 tech_info = self._get_random_tech_info()
             
             # 응답 조합
-            response_parts = []
+            response_parts: List[str] = []
             
             if repeat_intro:
                 response_parts.append(repeat_intro)
@@ -301,8 +301,10 @@ class DynamicResponseSystem:
         
         try:
             recent_check = await self.check_recent_responses(user_id, question)
-            previous_styles = [resp['style'] for resp in recent_check['previous_responses']] if recent_check['is_repeat'] else []
-            
+            previous_styles: List[str] = []
+            if recent_check and recent_check.get('is_repeat') and recent_check.get('previous_responses'):
+                 previous_styles = [resp.get('style', '') for resp in recent_check['previous_responses'] if isinstance(resp, dict)]
+
             response_style = self._choose_response_style(previous_styles)
             base_response = random.choice(greeting_patterns)
             
@@ -336,17 +338,20 @@ class DynamicResponseSystem:
         except Exception as e:
             logger.error(f"응답 기록 저장 오류: {e}")
     
-    async def update_tech_keywords_from_search(self, search_results: Dict):
+    async def update_tech_keywords_from_search(self, search_results: Dict[str, Any]):
         """검색 결과에서 기술 키워드 업데이트"""
         try:
-            if not search_results.get('results'):
+            results_list = search_results.get('results')
+            if not isinstance(results_list, list):
                 return
             
             # 검색 결과에서 키워드 추출
-            new_keywords = []
-            for result in search_results['results']:
-                title = result.get('title', '').lower()
-                snippet = result.get('snippet', '').lower()
+            new_keywords: List[str] = []
+            for result in results_list:
+                if not isinstance(result, dict): continue
+                
+                title = str(result.get('title', '') or '').lower()
+                snippet = str(result.get('snippet', '') or '').lower()
                 
                 # 기술 관련 키워드 패턴 찾기
                 tech_patterns = [
@@ -364,8 +369,9 @@ class DynamicResponseSystem:
             
             # 새로운 키워드 저장
             if new_keywords:
+                unique_keywords = set(new_keywords)
                 async with aiosqlite.connect(self.db_path) as db:
-                    for keyword in set(new_keywords):  # 중복 제거
+                    for keyword in unique_keywords:
                         await db.execute("""
                             INSERT OR REPLACE INTO tech_keywords (keyword, category, relevance_score, last_updated)
                             VALUES (?, ?, ?, ?)
@@ -378,29 +384,48 @@ class DynamicResponseSystem:
         except Exception as e:
             logger.error(f"기술 키워드 업데이트 오류: {e}")
 
-# 전역 인스턴스
-dynamic_response_system = None
+# --- 모듈 API ---
+# 이 시스템의 공개 인터페이스입니다. 다른 모듈에서는 이 함수들을 사용합니다.
+
+_dynamic_response_instance: Optional[DynamicResponseSystem] = None
 
 async def initialize_dynamic_responses():
-    """다양한 응답 시스템 초기화"""
-    global dynamic_response_system
-    dynamic_response_system = DynamicResponseSystem()
-    await dynamic_response_system.initialize()
-    return dynamic_response_system
+    """
+    다양한 응답 시스템을 초기화합니다.
+    """
+    global _dynamic_response_instance
+    if _dynamic_response_instance is None:
+        _dynamic_response_instance = DynamicResponseSystem()
+        await _dynamic_response_instance.initialize()
+    logger.info("다양한 응답 시스템 초기화 완료.")
 
-async def get_dynamic_response(user_id: str, question: str, question_type: str = 'activity') -> str:
-    """다양한 응답 생성"""
-    if dynamic_response_system is None:
-        return "시스템 초기화 중이에요... 잠시만 기다려주세요! 🔄"
+async def get_dynamic_response(response_type: str, user_id: str, question: str) -> str:
+    """
+    지정된 유형에 따라 동적 응답을 생성합니다.
+    - response_type: 'greeting' 또는 'activity'
+    """
+    if _dynamic_response_instance is None:
+        await initialize_dynamic_responses()
+
+    if _dynamic_response_instance:
+        if response_type == 'greeting':
+            return await _dynamic_response_instance.generate_greeting_response(user_id, question)
+        elif response_type == 'activity':
+            return await _dynamic_response_instance.generate_activity_response(user_id, question)
     
-    if question_type == 'activity':
-        return await dynamic_response_system.generate_activity_response(user_id, question)
-    elif question_type == 'greeting':
-        return await dynamic_response_system.generate_greeting_response(user_id, question)
+    # 기본 응답
+    if response_type == 'greeting':
+        return "안녕하세요! 만나서 반가워요. 😊"
     else:
-        return await dynamic_response_system.generate_activity_response(user_id, question)
+        return "지금은 여러 가지 생각 중이에요! 🤔"
 
-async def update_keywords_from_search(search_results: Dict):
-    """검색 결과로부터 키워드 업데이트"""
-    if dynamic_response_system is not None:
-        await dynamic_response_system.update_tech_keywords_from_search(search_results)
+
+async def update_keywords_from_web_search(search_results: Dict[str, Any]):
+    """
+    웹 검색 결과에서 키워드를 추출하고 데이터베이스를 업데이트합니다.
+    """
+    if _dynamic_response_instance is None:
+        await initialize_dynamic_responses()
+        
+    if _dynamic_response_instance:
+        await _dynamic_response_instance.update_tech_keywords_from_search(search_results)

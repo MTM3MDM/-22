@@ -12,20 +12,32 @@ from typing import Dict, List, Optional, Any, Tuple
 import hashlib
 import pickle
 from pathlib import Path
+from types import TracebackType
+from typing import Coroutine
 
 # 벡터 검색 및 임베딩
-import faiss
+try:
+    import faiss  # type: ignore
+except ImportError:
+    faiss = None
 import numpy as np
 from sentence_transformers import SentenceTransformer
-import chromadb
-from chromadb.config import Settings
+try:
+    import chromadb
+    from chromadb.config import Settings
+except ImportError:
+    chromadb = None
+
 
 # 뉴스 및 데이터 수집
-import feedparser
+import feedparser  # type: ignore
 import requests
 from bs4 import BeautifulSoup
-import newspaper
-from newspaper import Article
+try:
+    import newspaper  # type: ignore
+    from newspaper import Article  # type: ignore
+except ImportError:
+    newspaper = None
 
 # 텍스트 처리
 import re
@@ -101,7 +113,7 @@ class TechNewsCollector:
         }
         
         self.session = None
-        self.collected_articles = []
+        self.collected_articles: List[Dict[str, Any]] = []
         
     async def __aenter__(self):
         self.session = aiohttp.ClientSession(
@@ -110,41 +122,48 @@ class TechNewsCollector:
         )
         return self
         
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
+    async def __aexit__(self, 
+                      exc_type: Optional[type[BaseException]], 
+                      exc_val: Optional[BaseException], 
+                      exc_tb: Optional[TracebackType]):
+        if self.session and not self.session.closed:
             await self.session.close()
     
-    async def collect_from_rss(self, url: str, category: str) -> List[Dict]:
+    async def collect_from_rss(self, url: str, category: str) -> List[Dict[str, Any]]:
         """RSS 피드에서 뉴스 수집"""
+        if not self.session or self.session.closed:
+            logger.warning("Aiohttp 세션이 활성화되지 않았습니다. RSS 수집을 건너뜁니다.")
+            return []
         try:
             async with self.session.get(url) as response:
                 if response.status == 200:
                     content = await response.text()
                     feed = feedparser.parse(content)
                     
-                    articles = []
+                    articles: List[Dict[str, Any]] = []
                     for entry in feed.entries[:10]:  # 최신 10개만
-                        article = {
+                        article: Dict[str, Any] = {
                             'title': entry.get('title', ''),
                             'summary': entry.get('summary', ''),
                             'link': entry.get('link', ''),
                             'published': entry.get('published', ''),
                             'category': category,
-                            'source': feed.feed.get('title', 'Unknown'),
+                            'source': feed.feed.get('title', 'Unknown') if hasattr(feed, 'feed') else 'Unknown',
                             'collected_at': datetime.now().isoformat()
                         }
                         articles.append(article)
                     
                     logger.info(f"RSS에서 {len(articles)}개 기사 수집: {url}")
                     return articles
+            return [] # response.status가 200이 아닌 경우
                     
         except Exception as e:
             logger.error(f"RSS 수집 오류 {url}: {e}")
             return []
     
-    async def collect_all_news(self) -> List[Dict]:
+    async def collect_all_news(self) -> List[Dict[str, Any]]:
         """모든 소스에서 뉴스 수집"""
-        all_articles = []
+        all_articles: List[Dict[str, Any]] = []
         
         # 새로운 세션 생성
         async with aiohttp.ClientSession(
@@ -153,18 +172,21 @@ class TechNewsCollector:
         ) as session:
             self.session = session
             
+            tasks: List[Coroutine[Any, Any, List[Dict[str, Any]]]] = []
             for category, urls in self.news_sources.items():
                 for url in urls:
-                    articles = await self.collect_from_rss(url, category)
-                    if articles is not None:  # articles가 None이 아닌 경우만 확장
-                        all_articles.extend(articles)
-                    await asyncio.sleep(1)  # 요청 간격 조절
-        
+                    tasks.append(self.collect_from_rss(url, category))
+            
+            results = await asyncio.gather(*tasks)
+            for result in results:
+                if result:
+                    all_articles.extend(result)
+
         # 중복 제거 (제목 기준)
-        seen_titles = set()
-        unique_articles = []
+        seen_titles: set[str] = set()
+        unique_articles: List[Dict[str, Any]] = []
         for article in all_articles:
-            if article is not None and article.get('title'):  # article과 title이 존재하는 경우만 처리
+            if article and article.get('title'):
                 try:
                     title_hash = hashlib.md5(article['title'].encode()).hexdigest()
                     if title_hash not in seen_titles:
@@ -172,37 +194,42 @@ class TechNewsCollector:
                         unique_articles.append(article)
                 except Exception as e:
                     logger.debug(f"기사 중복 제거 처리 오류: {e}")
-                    # 해시 생성에 실패해도 기사는 추가
                     unique_articles.append(article)
         
         logger.info(f"총 {len(unique_articles)}개의 고유 기사 수집 완료")
         return unique_articles
     
-    async def enhance_article_content(self, article: Dict) -> Dict:
+    async def enhance_article_content(self, article: Dict[str, Any]) -> Dict[str, Any]:
         """기사 내용 상세 수집"""
+        if not self.session or self.session.closed:
+            logger.warning("Aiohttp 세션이 활성화되지 않았습니다. 기사 내용 수집을 건너뜁니다.")
+            return article
+
         try:
-            if not article.get('link'):
+            link = article.get('link')
+            if not link:
                 return article
                 
-            async with self.session.get(article['link']) as response:
+            async with self.session.get(link) as response:
                 if response.status == 200:
                     html_content = await response.text()
                     
                     # newspaper3k로 본문 추출
-                    try:
-                        news_article = Article(article['link'])
-                        news_article.set_html(html_content)
-                        news_article.parse()
-                        
-                        article['full_text'] = news_article.text
-                        article['authors'] = news_article.authors
-                        article['keywords'] = news_article.keywords
-                        
-                    except Exception as e:
-                        logger.warning(f"본문 추출 실패 {article['link']}: {e}")
-                        
+                    if newspaper and Article:
+                        try:
+                            news_article = Article(link)
+                            news_article.set_html(html_content)
+                            news_article.parse()
+                            
+                            article['full_text'] = news_article.text
+                            article['authors'] = news_article.authors
+                            article['keywords'] = news_article.keywords
+                            
+                        except Exception as e:
+                            logger.warning(f"본문 추출 실패 {link}: {e}")
+                            
         except Exception as e:
-            logger.error(f"기사 내용 수집 오류 {article['link']}: {e}")
+            logger.error(f"기사 내용 수집 오류 {link}: {e}")
             
         return article
 
@@ -211,43 +238,50 @@ class VectorKnowledgeBase:
     
     def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
         self.model_name = model_name
-        self.encoder = None
-        self.index = None
-        self.documents = []
-        self.metadata = []
+        self.encoder: Optional[SentenceTransformer] = None
+        self.index: Optional["faiss.Index"] = None
+        self.metadata: List[Dict[str, Any]] = []
         self.dimension = 384  # all-MiniLM-L6-v2의 차원
         
         # ChromaDB 설정
-        self.chroma_client = None
-        self.collection = None
+        self.chroma_client: Optional["chromadb.Client"] = None
+        self.collection: Optional["chromadb.Collection"] = None
         
         self.data_dir = Path("knowledge_base")
         self.data_dir.mkdir(exist_ok=True)
         
     async def initialize(self):
         """벡터 검색 시스템 초기화"""
+        if not faiss or not chromadb:
+            logger.error("FAISS 또는 ChromaDB가 설치되지 않아 벡터 검색 시스템을 초기화할 수 없습니다.")
+            return
+
         try:
             # SentenceTransformer 모델 로드
             self.encoder = SentenceTransformer(self.model_name)
             logger.info(f"임베딩 모델 로드 완료: {self.model_name}")
             
             # FAISS 인덱스 초기화
-            self.index = faiss.IndexFlatIP(self.dimension)  # Inner Product (코사인 유사도)
+            if faiss:
+                self.index = faiss.IndexFlatIP(self.dimension)  # Inner Product (코사인 유사도)
             
             # ChromaDB 초기화
-            self.chroma_client = chromadb.PersistentClient(
-                path=str(self.data_dir / "chroma_db")
-            )
-            
-            try:
-                self.collection = self.chroma_client.get_collection("tech_knowledge")
-                logger.info("기존 ChromaDB 컬렉션 로드")
-            except:
-                self.collection = self.chroma_client.create_collection(
-                    name="tech_knowledge",
-                    metadata={"description": "Tech news and AI knowledge base"}
+            if chromadb:
+                self.chroma_client = chromadb.PersistentClient(
+                    path=str(self.data_dir / "chroma_db")
                 )
-                logger.info("새 ChromaDB 컬렉션 생성")
+                
+                try:
+                    if self.chroma_client:
+                        self.collection = self.chroma_client.get_collection("tech_knowledge")
+                        logger.info("기존 ChromaDB 컬렉션 로드")
+                except Exception:
+                    if self.chroma_client:
+                        self.collection = self.chroma_client.create_collection(
+                            name="tech_knowledge",
+                            metadata={"description": "Tech news and AI knowledge base"}
+                        )
+                        logger.info("새 ChromaDB 컬렉션 생성")
                 
             # 기존 데이터 로드
             await self.load_existing_data()
@@ -258,10 +292,12 @@ class VectorKnowledgeBase:
     
     async def load_existing_data(self):
         """기존 저장된 데이터 로드"""
+        if not faiss:
+            return
         try:
             # FAISS 인덱스 로드
             index_path = self.data_dir / "faiss_index.bin"
-            if index_path.exists():
+            if index_path.exists() and faiss:
                 self.index = faiss.read_index(str(index_path))
                 logger.info("기존 FAISS 인덱스 로드")
             
@@ -277,6 +313,8 @@ class VectorKnowledgeBase:
     
     async def save_data(self):
         """데이터 저장"""
+        if not faiss or not self.index:
+            return
         try:
             # FAISS 인덱스 저장
             faiss.write_index(self.index, str(self.data_dir / "faiss_index.bin"))
@@ -306,9 +344,10 @@ class VectorKnowledgeBase:
         
         return text.strip()
     
-    async def add_articles(self, articles: List[Dict]):
+    async def add_articles(self, articles: List[Dict[str, Any]]):
         """기사들을 벡터 데이터베이스에 추가"""
-        if not articles:
+        if not articles or not self.encoder or not self.index or not self.collection:
+            logger.warning("시스템이 초기화되지 않았거나 추가할 기사가 없어 기사 추가를 건너뜁니다.")
             return
             
         try:
@@ -316,18 +355,18 @@ class VectorKnowledgeBase:
             new_metadata = []
             
             for article in articles:
-                if article is None:  # article이 None인 경우 건너뛰기
+                if article is None:
                     continue
                 # 텍스트 조합 (제목 + 요약 + 본문)
                 combined_text = f"{article.get('title', '')} {article.get('summary', '')} {article.get('full_text', '')}"
                 processed_text = self.preprocess_text(combined_text)
                 
-                if len(processed_text) < 50:  # 너무 짧은 텍스트 제외
+                if len(processed_text) < 50:
                     continue
                     
                 texts_to_embed.append(processed_text)
                 
-                metadata = {
+                metadata: Dict[str, Any] = {
                     'title': article.get('title', ''),
                     'summary': article.get('summary', ''),
                     'link': article.get('link', ''),
@@ -348,10 +387,11 @@ class VectorKnowledgeBase:
             embeddings = self.encoder.encode(texts_to_embed, show_progress_bar=True)
             
             # 정규화 (코사인 유사도를 위해)
-            embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+            embeddings_np = np.array(embeddings, dtype=np.float32)
+            faiss.normalize_L2(embeddings_np)
             
             # FAISS에 추가
-            self.index.add(embeddings.astype('float32'))
+            self.index.add(embeddings_np)
             self.metadata.extend(new_metadata)
             
             # ChromaDB에도 추가
@@ -371,18 +411,22 @@ class VectorKnowledgeBase:
         except Exception as e:
             logger.error(f"기사 추가 오류: {e}")
     
-    async def search(self, query: str, top_k: int = 5) -> List[Dict]:
+    async def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """벡터 검색 수행"""
+        if not self.encoder or not self.index:
+            logger.warning("인코더 또는 인덱스가 초기화되지 않아 검색을 수행할 수 없습니다.")
+            return []
         try:
             if not query.strip():
                 return []
                 
             # 쿼리 임베딩
             query_embedding = self.encoder.encode([query])
-            query_embedding = query_embedding / np.linalg.norm(query_embedding, axis=1, keepdims=True)
+            query_embedding_np = np.array(query_embedding, dtype=np.float32)
+            faiss.normalize_L2(query_embedding_np)
             
             # FAISS 검색
-            scores, indices = self.index.search(query_embedding.astype('float32'), top_k)
+            scores, indices = self.index.search(query_embedding_np, top_k)
             
             results = []
             for i, (score, idx) in enumerate(zip(scores[0], indices[0])):
@@ -498,155 +542,115 @@ class IntelligentResponseGenerator:
             search_results = await self.knowledge_base.search(query, top_k=5)
             
             if not search_results:
-                return "최신 기술 뉴스를 찾을 수 없습니다."
+                return "요약할 최신 기술 뉴스를 찾지 못했어요."
             
-            summary_parts = []
-            for i, result in enumerate(search_results, 1):
-                title = result.get('title', '')
-                source = result.get('source', '')
-                summary = result.get('summary', '')[:200] + "..." if len(result.get('summary', '')) > 200 else result.get('summary', '')
-                
-                part = f"{i}. **{title}**\n   📰 {source}\n   {summary}\n"
-                summary_parts.append(part)
+            summary_parts = ["📰 **최신 기술 뉴스 요약**\n"]
+            for result in search_results:
+                title = result.get('title', '제목 없음')
+                link = result.get('link', '#')
+                source = result.get('source', '출처 불명')
+                summary_parts.append(f"• **[{source}] {title}**\n  [링크]({link})")
             
-            final_summary = f"""🔥 **최신 기술 뉴스 요약**
-
-{chr(10).join(summary_parts)}
-
-📅 *업데이트: {datetime.now().strftime('%Y-%m-%d %H:%M')}*"""
-            
-            return final_summary
+            return "\n".join(summary_parts)
             
         except Exception as e:
-            logger.error(f"뉴스 요약 생성 오류: {e}")
-            return "뉴스 요약 생성 중 오류가 발생했습니다."
+            logger.error(f"기술 뉴스 요약 생성 오류: {e}")
+            return "기술 뉴스 요약을 생성하는 중 오류가 발생했어요."
 
-class KnowledgeUpdateScheduler:
-    """지식베이스 자동 업데이트 스케줄러"""
-    
-    def __init__(self, collector: TechNewsCollector, knowledge_base: VectorKnowledgeBase):
-        self.collector = collector
-        self.knowledge_base = knowledge_base
-        self.update_interval = 3600  # 1시간마다 업데이트
-        self.last_update = None
-        self.is_running = False
-    
-    async def start_scheduler(self):
-        """스케줄러 시작"""
-        self.is_running = True
-        logger.info("지식베이스 자동 업데이트 스케줄러 시작")
-        
-        while self.is_running:
-            try:
-                await self.update_knowledge_base()
-                await asyncio.sleep(self.update_interval)
-                
-            except Exception as e:
-                logger.error(f"스케줄러 오류: {e}")
-                await asyncio.sleep(300)  # 5분 후 재시도
-    
-    async def update_knowledge_base(self):
-        """지식베이스 업데이트"""
-        try:
-            logger.info("지식베이스 업데이트 시작")
-            
-            # collector가 None인 경우 새로 생성
-            if self.collector is None:
-                self.collector = TechNewsCollector()
-            
-            # 최신 뉴스 수집
-            articles = await self.collector.collect_all_news()
-            
-            # articles가 None이거나 빈 리스트인 경우 처리
-            if articles is None:
-                articles = []
-            
-            if articles and len(articles) > 0:
-                # 기사 내용 상세 수집 (일부만)
-                enhanced_articles = []
-                for article in articles[:20]:  # 최신 20개만 상세 수집
-                    try:
-                        if article is not None:  # article이 None이 아닌 경우만 처리
-                            enhanced = await self.collector.enhance_article_content(article)
-                            if enhanced is not None:
-                                enhanced_articles.append(enhanced)
-                            else:
-                                # enhanced가 None인 경우 원본 기사라도 추가
-                                enhanced_articles.append(article)
-                    except Exception as e:
-                        logger.debug(f"기사 상세 수집 오류: {e}")
-                        # 기본 기사 정보라도 추가
-                        if article is not None:
-                            enhanced_articles.append(article)
-                    await asyncio.sleep(1)  # 요청 간격 조절
-                
-                if enhanced_articles:
-                    # 벡터 데이터베이스에 추가
-                    await self.knowledge_base.add_articles(enhanced_articles)
-                    
-                    self.last_update = datetime.now()
-                    logger.info(f"지식베이스 업데이트 완료: {len(enhanced_articles)}개 기사 추가")
-                else:
-                    logger.warning("상세 수집된 기사가 없습니다")
-            else:
-                logger.warning("수집된 기사가 없습니다")
-                    
-        except Exception as e:
-            logger.error(f"지식베이스 업데이트 오류: {e}")
-    
-    def stop_scheduler(self):
-        """스케줄러 중지"""
-        self.is_running = False
-        logger.info("지식베이스 자동 업데이트 스케줄러 중지")
+# --- 모듈 API ---
+# 이 시스템의 공개 인터페이스입니다. 다른 모듈에서는 이 함수들을 사용합니다.
 
-# 전역 인스턴스들
-tech_collector = TechNewsCollector()
-vector_kb = VectorKnowledgeBase()
-response_generator = None
-update_scheduler = None
+knowledge_system_instance: Optional[VectorKnowledgeBase] = None
+response_generator_instance: Optional[IntelligentResponseGenerator] = None
+is_initialized = False
 
-async def initialize_knowledge_system():
-    """지식 시스템 초기화"""
-    global response_generator, update_scheduler
+async def initialize_knowledge_system(update_on_start: bool = True):
+    """
+    고급 지식 시스템을 초기화합니다.
+    - 벡터 데이터베이스를 설정합니다.
+    - 응답 생성기를 준비합니다.
+    - update_on_start가 True이면, 시작 시 최신 뉴스를 수집하고 데이터베이스에 추가합니다.
+    """
+    global knowledge_system_instance, response_generator_instance, is_initialized
     
+    if is_initialized:
+        logger.info("지식 시스템이 이미 초기화되었습니다.")
+        return
+
     try:
-        logger.info("고급 지식 시스템 초기화 시작")
+        logger.info("고급 지식 시스템 초기화 시작...")
         
-        # 벡터 지식베이스 초기화
-        await vector_kb.initialize()
+        knowledge_system_instance = VectorKnowledgeBase()
+        await knowledge_system_instance.initialize()
         
-        # 응답 생성기 초기화
-        response_generator = IntelligentResponseGenerator(vector_kb)
+        response_generator_instance = IntelligentResponseGenerator(knowledge_system_instance)
         
-        # 업데이트 스케줄러 초기화
-        update_scheduler = KnowledgeUpdateScheduler(tech_collector, vector_kb)
+        if update_on_start:
+            logger.info("시작 시 뉴스 업데이트를 수행합니다...")
+            async with TechNewsCollector() as collector:
+                articles = await collector.collect_all_news()
+                if articles:
+                    # 기사 내용 상세 수집 (선택적, 시간이 오래 걸릴 수 있음)
+                    # enhanced_articles = await asyncio.gather(
+                    #     *[collector.enhance_article_content(art) for art in articles[:20]] # 예: 20개만
+                    # )
+                    await knowledge_system_instance.add_articles(articles)
         
-        # 초기 데이터 수집 (백그라운드에서)
-        asyncio.create_task(update_scheduler.update_knowledge_base())
-        
-        # 자동 업데이트 시작 (백그라운드에서)
-        asyncio.create_task(update_scheduler.start_scheduler())
-        
-        logger.info("고급 지식 시스템 초기화 완료")
+        is_initialized = True
+        logger.info("고급 지식 시스템 초기화 완료.")
         
     except Exception as e:
-        logger.error(f"지식 시스템 초기화 오류: {e}")
-        raise
+        logger.critical(f"고급 지식 시스템 초기화에 치명적인 오류 발생: {e}", exc_info=True)
+        # 초기화 실패 시, 관련 인스턴스를 None으로 설정하여 오류 전파를 막습니다.
+        knowledge_system_instance = None
+        response_generator_instance = None
+        is_initialized = False
 
 async def get_enhanced_response(query: str, base_response: str) -> str:
-    """강화된 응답 생성"""
-    if response_generator:
-        return await response_generator.generate_enhanced_response(query, base_response)
-    return base_response
+    """
+    기본 응답에 최신 기술 정보를 추가하여 강화된 응답을 반환합니다.
+    """
+    if not is_initialized or not response_generator_instance:
+        logger.warning("지식 시스템이 초기화되지 않아 응답 강화를 건너뜁니다.")
+        return base_response
+    
+    return await response_generator_instance.generate_enhanced_response(query, base_response)
 
 async def get_tech_news_summary(category: str = None) -> str:
-    """기술 뉴스 요약"""
-    if response_generator:
-        return await response_generator.get_tech_news_summary(category)
-    return "지식 시스템이 초기화되지 않았습니다."
+    """
+    지정된 카테고리 또는 전체 최신 기술 뉴스에 대한 요약을 반환합니다.
+    """
+    if not is_initialized or not response_generator_instance:
+        logger.warning("지식 시스템이 초기화되지 않아 뉴스 요약을 건너뜁니다.")
+        return "지식 시스템이 아직 준비되지 않았어요. 잠시 후 다시 시도해주세요."
+        
+    return await response_generator_instance.get_tech_news_summary(category)
 
-async def search_knowledge_base(query: str, top_k: int = 5) -> List[Dict]:
-    """지식베이스 검색"""
-    if vector_kb:
-        return await vector_kb.search(query, top_k)
-    return []
+async def search_knowledge_base(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    """
+    내부 지식 베이스에서 정보를 검색합니다.
+    """
+    if not is_initialized or not knowledge_system_instance:
+        logger.warning("지식 시스템이 초기화되지 않아 지식 검색을 건너뜁니다.")
+        return []
+        
+    return await knowledge_system_instance.search(query, top_k)
+
+# --- 스케줄링된 작업 ---
+async def scheduled_news_update():
+    """
+    정기적으로 최신 뉴스를 수집하고 벡터 데이터베이스를 업데이트합니다.
+    """
+    if not is_initialized:
+        logger.info("스케줄된 뉴스 업데이트: 시스템이 아직 초기화되지 않았습니다.")
+        return
+
+    logger.info("스케줄된 뉴스 업데이트 시작...")
+    try:
+        async with TechNewsCollector() as collector:
+            articles = await collector.collect_all_news()
+            if articles and knowledge_system_instance:
+                await knowledge_system_instance.add_articles(articles)
+        logger.info("스케줄된 뉴스 업데이트 완료.")
+    except Exception as e:
+        logger.error(f"스케줄된 뉴스 업데이트 중 오류 발생: {e}", exc_info=True)

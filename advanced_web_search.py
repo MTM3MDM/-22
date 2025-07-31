@@ -11,9 +11,10 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 from urllib.parse import quote, urljoin
 import hashlib
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 import requests
 from dataclasses import dataclass
+from types import TracebackType
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ class AdvancedWebSearcher:
         }
         
         self.session = None
-        self.cache = {}
+        self.cache: Dict[str, Dict[str, Any]] = {}
         self.cache_ttl = 3600  # 1시간 캐시
     
     async def __aenter__(self):
@@ -63,21 +64,26 @@ class AdvancedWebSearcher:
         )
         return self
     
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, 
+                      exc_type: Optional[type[BaseException]], 
+                      exc_val: Optional[BaseException], 
+                      exc_tb: Optional[TracebackType]):
         """비동기 컨텍스트 매니저 종료"""
-        if self.session:
+        if self.session and not self.session.closed:
             await self.session.close()
     
     def _get_cache_key(self, query: str, engine: str) -> str:
         """캐시 키 생성"""
         return hashlib.md5(f"{query}_{engine}".encode()).hexdigest()
     
-    def _is_cache_valid(self, cache_entry: dict) -> bool:
+    def _is_cache_valid(self, cache_entry: Dict[str, Any]) -> bool:
         """캐시 유효성 검사"""
-        return time.time() - cache_entry['timestamp'] < self.cache_ttl
+        return time.time() - cache_entry.get('timestamp', 0) < self.cache_ttl
     
     async def _search_google(self, query: str, max_results: int = 10) -> List[SearchResult]:
         """Google 검색 (스크래핑 방식)"""
+        if not self.session:
+            return []
         try:
             search_url = f"https://www.google.com/search?q={quote(query)}&num={max_results}&hl=ko"
             
@@ -89,30 +95,41 @@ class AdvancedWebSearcher:
                 html = await response.text()
                 soup = BeautifulSoup(html, 'html.parser')
                 
-                results = []
+                results: List[SearchResult] = []
                 search_results = soup.find_all('div', class_='g')
                 
                 for result in search_results[:max_results]:
+                    if not isinstance(result, Tag):
+                        continue
                     try:
                         title_elem = result.find('h3')
                         link_elem = result.find('a')
-                        snippet_elem = result.find('span', class_=['aCOpRe', 'st'])
                         
-                        if title_elem and link_elem:
+                        # 스니펫을 찾기 위한 여러 클래스 시도
+                        snippet_elem = result.find('div', attrs={"data-sncf": "1"})
+                        if not snippet_elem:
+                            snippet_elem = result.find('div', class_='VwiC3b')
+
+                        if title_elem and isinstance(title_elem, Tag) and link_elem and isinstance(link_elem, Tag):
                             title = title_elem.get_text(strip=True)
-                            url = link_elem.get('href', '')
-                            snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
+                            url_val = link_elem.get('href')
+                            url = str(url_val) if url_val else ""
+                            
+                            snippet = ""
+                            if snippet_elem and isinstance(snippet_elem, Tag):
+                                snippet = snippet_elem.get_text(strip=True)
                             
                             if url.startswith('/url?q='):
                                 url = url.split('/url?q=')[1].split('&')[0]
                             
-                            results.append(SearchResult(
-                                title=title,
-                                url=url,
-                                snippet=snippet,
-                                source="Google",
-                                timestamp=datetime.now().isoformat()
-                            ))
+                            if url: # URL이 있는 경우에만 추가
+                                results.append(SearchResult(
+                                    title=title,
+                                    url=url,
+                                    snippet=snippet,
+                                    source="Google",
+                                    timestamp=datetime.now().isoformat()
+                                ))
                     except Exception as e:
                         logger.debug(f"Google 결과 파싱 오류: {e}")
                         continue
@@ -126,6 +143,8 @@ class AdvancedWebSearcher:
     
     async def _search_bing(self, query: str, max_results: int = 10) -> List[SearchResult]:
         """Bing 검색"""
+        if not self.session:
+            return []
         try:
             search_url = f"https://www.bing.com/search?q={quote(query)}&count={max_results}"
             
@@ -136,27 +155,35 @@ class AdvancedWebSearcher:
                 html = await response.text()
                 soup = BeautifulSoup(html, 'html.parser')
                 
-                results = []
+                results: List[SearchResult] = []
                 search_results = soup.find_all('li', class_='b_algo')
                 
                 for result in search_results[:max_results]:
+                    if not isinstance(result, Tag):
+                        continue
                     try:
                         title_elem = result.find('h2')
-                        link_elem = title_elem.find('a') if title_elem else None
                         snippet_elem = result.find('p')
                         
-                        if title_elem and link_elem:
-                            title = title_elem.get_text(strip=True)
-                            url = link_elem.get('href', '')
-                            snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
-                            
-                            results.append(SearchResult(
-                                title=title,
-                                url=url,
-                                snippet=snippet,
-                                source="Bing",
-                                timestamp=datetime.now().isoformat()
-                            ))
+                        if title_elem and isinstance(title_elem, Tag):
+                            link_elem = title_elem.find('a')
+                            if link_elem and isinstance(link_elem, Tag):
+                                title = title_elem.get_text(strip=True)
+                                url_val = link_elem.get('href')
+                                url = str(url_val) if url_val else ""
+                                
+                                snippet = ""
+                                if snippet_elem and isinstance(snippet_elem, Tag):
+                                    snippet = snippet_elem.get_text(strip=True)
+                                
+                                if url: # URL이 있는 경우에만 추가
+                                    results.append(SearchResult(
+                                        title=title,
+                                        url=url,
+                                        snippet=snippet,
+                                        source="Bing",
+                                        timestamp=datetime.now().isoformat()
+                                    ))
                     except Exception as e:
                         continue
                 
@@ -169,6 +196,8 @@ class AdvancedWebSearcher:
     
     async def _search_duckduckgo(self, query: str, max_results: int = 10) -> List[SearchResult]:
         """DuckDuckGo 검색"""
+        if not self.session:
+            return []
         try:
             # DuckDuckGo Instant Answer API 사용
             search_url = f"https://api.duckduckgo.com/?q={quote(query)}&format=json&no_html=1&skip_disambig=1"
@@ -178,7 +207,7 @@ class AdvancedWebSearcher:
                     return []
                 
                 data = await response.json()
-                results = []
+                results: List[SearchResult] = []
                 
                 # Abstract 결과
                 if data.get('Abstract'):
@@ -192,11 +221,11 @@ class AdvancedWebSearcher:
                 
                 # Related Topics
                 for topic in data.get('RelatedTopics', [])[:max_results-1]:
-                    if isinstance(topic, dict) and 'Text' in topic:
+                    if isinstance(topic, dict) and 'Text' in topic and 'FirstURL' in topic:
                         results.append(SearchResult(
-                            title=topic.get('Text', '')[:100] + "...",
-                            url=topic.get('FirstURL', ''),
-                            snippet=topic.get('Text', ''),
+                            title=str(topic.get('Text', ''))[:100] + "...",
+                            url=str(topic.get('FirstURL', '')),
+                            snippet=str(topic.get('Text', '')),
                             source="DuckDuckGo",
                             timestamp=datetime.now().isoformat()
                         ))
@@ -210,6 +239,8 @@ class AdvancedWebSearcher:
     
     async def _search_wikipedia(self, query: str, max_results: int = 5) -> List[SearchResult]:
         """Wikipedia 검색"""
+        if not self.session:
+            return []
         try:
             # Wikipedia API 사용
             search_url = f"https://ko.wikipedia.org/api/rest_v1/page/summary/{quote(query)}"
@@ -237,16 +268,17 @@ class AdvancedWebSearcher:
                         return []
                     
                     data = await response.json()
-                    results = []
+                    results: List[SearchResult] = []
                     
                     for item in data.get('query', {}).get('search', []):
-                        results.append(SearchResult(
-                            title=item.get('title', ''),
-                            url=f"https://ko.wikipedia.org/wiki/{quote(item.get('title', ''))}",
-                            snippet=re.sub(r'<[^>]+>', '', item.get('snippet', '')),
-                            source="Wikipedia",
-                            timestamp=datetime.now().isoformat()
-                        ))
+                        if isinstance(item, dict):
+                            results.append(SearchResult(
+                                title=item.get('title', ''),
+                                url=f"https://ko.wikipedia.org/wiki/{quote(item.get('title', ''))}",
+                                snippet=re.sub(r'<[^>]+>', '', item.get('snippet', '')),
+                                source="Wikipedia",
+                                timestamp=datetime.now().isoformat()
+                            ))
                     
                     logger.info(f"Wikipedia에서 {len(results)}개 결과 수집")
                     return results
@@ -257,6 +289,8 @@ class AdvancedWebSearcher:
     
     async def _search_reddit(self, query: str, max_results: int = 5) -> List[SearchResult]:
         """Reddit 검색"""
+        if not self.session:
+            return []
         try:
             search_url = f"https://www.reddit.com/search.json?q={quote(query)}&limit={max_results}&sort=relevance"
             
@@ -265,18 +299,19 @@ class AdvancedWebSearcher:
                     return []
                 
                 data = await response.json()
-                results = []
+                results: List[SearchResult] = []
                 
                 for post in data.get('data', {}).get('children', []):
-                    post_data = post.get('data', {})
-                    
-                    results.append(SearchResult(
-                        title=post_data.get('title', ''),
-                        url=f"https://reddit.com{post_data.get('permalink', '')}",
-                        snippet=post_data.get('selftext', '')[:200] + "..." if post_data.get('selftext') else "",
-                        source=f"Reddit (r/{post_data.get('subreddit', '')})",
-                        timestamp=datetime.now().isoformat()
-                    ))
+                    if isinstance(post, dict):
+                        post_data = post.get('data', {})
+                        if isinstance(post_data, dict):
+                            results.append(SearchResult(
+                                title=post_data.get('title', ''),
+                                url=f"https://reddit.com{post_data.get('permalink', '')}",
+                                snippet=post_data.get('selftext', '')[:200] + "..." if post_data.get('selftext') else "",
+                                source=f"Reddit (r/{post_data.get('subreddit', '')})",
+                                timestamp=datetime.now().isoformat()
+                            ))
                 
                 logger.info(f"Reddit에서 {len(results)}개 결과 수집")
                 return results
@@ -287,6 +322,8 @@ class AdvancedWebSearcher:
     
     async def _search_github(self, query: str, max_results: int = 5) -> List[SearchResult]:
         """GitHub 검색"""
+        if not self.session:
+            return []
         try:
             search_url = f"https://api.github.com/search/repositories?q={quote(query)}&sort=stars&order=desc&per_page={max_results}"
             
@@ -295,16 +332,17 @@ class AdvancedWebSearcher:
                     return []
                 
                 data = await response.json()
-                results = []
+                results: List[SearchResult] = []
                 
                 for repo in data.get('items', []):
-                    results.append(SearchResult(
-                        title=repo.get('full_name', ''),
-                        url=repo.get('html_url', ''),
-                        snippet=repo.get('description', '') or "설명 없음",
-                        source=f"GitHub (⭐{repo.get('stargazers_count', 0)})",
-                        timestamp=datetime.now().isoformat()
-                    ))
+                    if isinstance(repo, dict):
+                        results.append(SearchResult(
+                            title=repo.get('full_name', ''),
+                            url=repo.get('html_url', ''),
+                            snippet=repo.get('description', '') or "설명 없음",
+                            source=f"GitHub (⭐{repo.get('stargazers_count', 0)})",
+                            timestamp=datetime.now().isoformat()
+                        ))
                 
                 logger.info(f"GitHub에서 {len(results)}개 결과 수집")
                 return results
@@ -315,6 +353,8 @@ class AdvancedWebSearcher:
     
     async def _search_stackoverflow(self, query: str, max_results: int = 5) -> List[SearchResult]:
         """Stack Overflow 검색"""
+        if not self.session:
+            return []
         try:
             search_url = f"https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={quote(query)}&site=stackoverflow&pagesize={max_results}"
             
@@ -323,16 +363,17 @@ class AdvancedWebSearcher:
                     return []
                 
                 data = await response.json()
-                results = []
+                results: List[SearchResult] = []
                 
                 for question in data.get('items', []):
-                    results.append(SearchResult(
-                        title=question.get('title', ''),
-                        url=question.get('link', ''),
-                        snippet=f"조회수: {question.get('view_count', 0)}, 답변: {question.get('answer_count', 0)}",
-                        source="Stack Overflow",
-                        timestamp=datetime.now().isoformat()
-                    ))
+                    if isinstance(question, dict):
+                        results.append(SearchResult(
+                            title=question.get('title', ''),
+                            url=question.get('link', ''),
+                            snippet=f"조회수: {question.get('view_count', 0)}, 답변: {question.get('answer_count', 0)}",
+                            source="Stack Overflow",
+                            timestamp=datetime.now().isoformat()
+                        ))
                 
                 logger.info(f"Stack Overflow에서 {len(results)}개 결과 수집")
                 return results
@@ -341,12 +382,12 @@ class AdvancedWebSearcher:
             logger.error(f"Stack Overflow 검색 오류: {e}")
             return []
     
-    async def search_multiple_engines(self, query: str, engines: List[str] = None, max_results_per_engine: int = 5) -> Dict[str, List[SearchResult]]:
+    async def search_multiple_engines(self, query: str, engines: Optional[List[str]] = None, max_results_per_engine: int = 5) -> Dict[str, List[SearchResult]]:
         """다중 검색 엔진에서 검색"""
         if engines is None:
             engines = ['google', 'wikipedia', 'github']
         
-        results = {}
+        results: Dict[str, List[SearchResult]] = {}
         tasks = []
         
         for engine in engines:
@@ -419,7 +460,7 @@ class AdvancedWebSearcher:
     
     def merge_and_rank_results(self, search_results: Dict[str, List[SearchResult]], query: str, max_results: int = 10) -> List[SearchResult]:
         """검색 결과 병합 및 순위 매기기"""
-        all_results = []
+        all_results: List[SearchResult] = []
         seen_urls = set()
         
         # 모든 결과 수집 및 중복 제거
@@ -435,7 +476,7 @@ class AdvancedWebSearcher:
         
         return all_results[:max_results]
     
-    async def comprehensive_search(self, query: str, engines: List[str] = None, max_results: int = 10) -> Tuple[List[SearchResult], Dict[str, Any]]:
+    async def comprehensive_search(self, query: str, engines: Optional[List[str]] = None, max_results: int = 10) -> Tuple[List[SearchResult], Dict[str, Any]]:
         """종합 검색 수행"""
         start_time = time.time()
         
@@ -455,7 +496,7 @@ class AdvancedWebSearcher:
         final_results = self.merge_and_rank_results(search_results, query, max_results)
         
         # 검색 통계
-        search_stats = {
+        search_stats: Dict[str, Any] = {
             'query': query,
             'engines_used': list(search_results.keys()),
             'total_results_found': sum(len(results) for results in search_results.values()),
@@ -498,76 +539,86 @@ class SearchResultFormatter:
             # 스니펫 길이 제한
             snippet = result.snippet[:150] + "..." if len(result.snippet) > 150 else result.snippet
             
-            result_text = f"{i}. **{title}**\n"
-            result_text += f"   🔗 {result.url}\n"
-            result_text += f"   📰 {result.source}"
-            
-            if result.relevance_score > 0:
-                result_text += f" (관련도: {result.relevance_score:.1f})"
-            
-            result_text += f"\n   💬 {snippet}\n\n"
-            
-            # 길이 제한 확인
-            if current_length + len(result_text) > max_length - 100:
-                results_text += f"... 및 {len(results) - i + 1}개 추가 결과\n"
+            result_str = f"**{i}. [{title}]({result.url})**\n"
+            if result.source:
+                result_str += f"   - 출처: `{result.source}`\n"
+            if result.snippet:
+                result_str += f"   - 요약: *{snippet}*\n\n"
+            else:
+                result_str += "\n"
+
+            if current_length + len(result_str) > max_length:
                 break
             
-            results_text += result_text
-            current_length += len(result_text)
+            results_text += result_str
+            current_length += len(result_str)
         
-        # 푸터
-        footer = f"⏰ 검색 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        
-        return header + results_text + footer
-    
-    @staticmethod
-    def format_summary(results: List[SearchResult], max_results: int = 3) -> str:
-        """검색 결과 요약"""
-        if not results:
-            return "검색 결과가 없습니다."
-        
-        summary = "📋 **검색 결과 요약:**\n\n"
-        
-        for i, result in enumerate(results[:max_results], 1):
-            summary += f"{i}. **{result.title}** ({result.source})\n"
-            summary += f"   {result.snippet[:100]}...\n\n"
-        
-        return summary
+        return header + results_text
 
-# 전역 검색 인스턴스
-web_searcher = None
+# --- 모듈 API ---
+# 이 시스템의 공개 인터페이스입니다. 다른 모듈에서는 이 함수들을 사용합니다.
+
+_searcher_instance: Optional[AdvancedWebSearcher] = None
 
 async def initialize_web_search():
-    """웹 검색 시스템 초기화"""
-    global web_searcher
-    try:
-        web_searcher = AdvancedWebSearcher()
-        logger.info("고급 웹 검색 시스템 초기화 완료")
-    except Exception as e:
-        logger.error(f"웹 검색 시스템 초기화 오류: {e}")
+    """
+    고급 웹 검색 시스템을 초기화합니다.
+    """
+    global _searcher_instance
+    if _searcher_instance is None:
+        _searcher_instance = AdvancedWebSearcher()
+    logger.info("고급 웹 검색 시스템 초기화 완료.")
 
-async def search_web(query: str, engines: List[str] = None, max_results: int = 10) -> str:
-    """웹 검색 수행 및 결과 반환"""
-    if not web_searcher:
-        return "🔧 웹 검색 시스템이 초기화되지 않았습니다."
+async def search_web(query: str, engines: Optional[List[str]] = None, max_results: int = 5) -> str:
+    """
+    웹을 검색하고 결과를 Discord용으로 포맷팅하여 반환합니다.
+    """
+    if _searcher_instance is None:
+        await initialize_web_search()
     
-    try:
-        async with web_searcher:
-            results, stats = await web_searcher.comprehensive_search(query, engines, max_results)
-            return SearchResultFormatter.format_for_discord(results, stats)
-    except Exception as e:
-        logger.error(f"웹 검색 오류: {e}")
-        return f"🚨 웹 검색 중 오류가 발생했습니다: {str(e)}"
+    # _searcher_instance가 None이 아님을 보장
+    if _searcher_instance is None:
+        logger.error("웹 검색 인스턴스 초기화에 실패했습니다.")
+        return "오류: 웹 검색 시스템을 초기화할 수 없습니다."
 
-async def search_web_summary(query: str, engines: List[str] = None) -> str:
-    """웹 검색 요약 결과 반환"""
-    if not web_searcher:
-        return "🔧 웹 검색 시스템이 초기화되지 않았습니다."
-    
-    try:
-        async with web_searcher:
-            results, stats = await web_searcher.comprehensive_search(query, engines, max_results=5)
-            return SearchResultFormatter.format_summary(results)
-    except Exception as e:
-        logger.error(f"웹 검색 요약 오류: {e}")
-        return f"🚨 웹 검색 요약 중 오류가 발생했습니다: {str(e)}"
+    async with _searcher_instance as searcher:
+        results, stats = await searcher.comprehensive_search(query, engines, max_results)
+        return SearchResultFormatter.format_for_discord(results, stats)
+
+async def search_web_summary(query: str, engines: Optional[List[str]] = None) -> Dict[str, Any]:
+    """
+    웹을 검색하고, 가장 관련성 높은 결과의 내용을 요약하여 반환합니다.
+    """
+    if _searcher_instance is None:
+        await initialize_web_search()
+
+    # _searcher_instance가 None이 아님을 보장
+    if _searcher_instance is None:
+        logger.error("웹 검색 인스턴스 초기화에 실패했습니다.")
+        return {
+            "summary": "오류: 웹 검색 시스템을 초기화할 수 없습니다.",
+            "top_result": None,
+            "stats": {}
+        }
+
+    async with _searcher_instance as searcher:
+        results, stats = await searcher.comprehensive_search(query, engines, max_results=3)
+        
+        if not results:
+            return {
+                "summary": "관련 정보를 찾을 수 없습니다.",
+                "top_result": None,
+                "stats": stats
+            }
+        
+        top_result = results[0]
+        
+        # 간단한 요약 생성 (여기서는 스니펫을 사용하지만, LLM을 이용해 더 정교한 요약 가능)
+        summary = f"가장 관련성 높은 검색 결과는 '{top_result.source}'에서 찾은 '{top_result.title}'입니다. "
+        summary += f"요약 내용은 다음과 같습니다: {top_result.snippet}"
+        
+        return {
+            "summary": summary,
+            "top_result": top_result,
+            "stats": stats
+        }

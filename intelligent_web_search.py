@@ -7,15 +7,16 @@ import asyncio
 import json
 import logging
 import hashlib
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple
+from datetime import datetime, timedelta, timezone
 import aiohttp
 import aiosqlite
 import numpy as np
+from numpy.typing import NDArray
 from sentence_transformers import SentenceTransformer
-import faiss
-from serpapi import GoogleSearch
+import faiss  # type: ignore
+from serpapi import GoogleSearch  # type: ignore
 import re
+from typing import Any, Dict, List, Optional, cast
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 class IntelligentWebSearcher:
     """지능형 웹 검색 시스템"""
     
-    def __init__(self, serpapi_key: str = "YOUR_SERPAPI_KEY_HERE", db_path: str = "search_memory.db"):
+    def __init__(self, serpapi_key: str, db_path: str = "search_memory.db"):
         self.serpapi_key = serpapi_key
         self.db_path = db_path
         
@@ -33,12 +34,12 @@ class IntelligentWebSearcher:
         
         # FAISS 인덱스 초기화
         self.dimension = 384  # all-MiniLM-L6-v2의 차원
-        self.index = faiss.IndexFlatIP(self.dimension)  # 코사인 유사도용
-        self.search_memory = []  # 검색 기록 메타데이터
+        self.index: faiss.Index = faiss.IndexFlatIP(self.dimension)  # 코사인 유사도용
+        self.search_memory: List[Dict[str, Any]] = []  # 검색 기록 메타데이터
         
         # 검색 결과 캐시 (메모리 효율성을 위해)
-        self.cache = {}
-        self.cache_expiry = {}
+        self.cache: Dict[str, Any] = {}
+        self.cache_expiry: Dict[str, datetime] = {}
         self.cache_duration = timedelta(hours=6)  # 6시간 캐시
         
         # 2025년 최신 기술 키워드 (검색 강화용)
@@ -106,13 +107,12 @@ class IntelligentWebSearcher:
                 """) as cursor:
                     rows = await cursor.fetchall()
                     
-                    embeddings = []
+                    embeddings: List[NDArray[np.float32]] = []
                     for row in rows:
                         query, results, summary, embedding_blob, date, score = row
                         
                         if embedding_blob:
-                            # BLOB에서 numpy 배열로 변환
-                            embedding = np.frombuffer(embedding_blob, dtype=np.float32)
+                            embedding: NDArray[np.float32] = np.frombuffer(embedding_blob, dtype=np.float32)
                             embeddings.append(embedding)
                             
                             self.search_memory.append({
@@ -124,8 +124,8 @@ class IntelligentWebSearcher:
                             })
                     
                     if embeddings:
-                        embeddings_array = np.vstack(embeddings)
-                        self.index.add(embeddings_array.astype('float32'))
+                        embeddings_array: NDArray[np.float32] = np.vstack(embeddings).astype('float32')
+                        self.index.add(embeddings_array)  # type: ignore
                         
             logger.info(f"검색 기록 {len(self.search_memory)}개 로드 완료! 이전 기억들을 다 불러왔어요~ 🧠")
             
@@ -141,43 +141,46 @@ class IntelligentWebSearcher:
         ]
         
         for key in expired_keys:
-            del self.cache[key]
-            del self.cache_expiry[key]
+            self.cache.pop(key, None)
+            self.cache_expiry.pop(key, None)
     
     def _get_query_hash(self, query: str) -> str:
         """쿼리 해시 생성"""
         return hashlib.md5(query.lower().strip().encode()).hexdigest()
     
-    async def search_web(self, query: str, num_results: int = 5) -> Dict:
+    async def search_web(self, query: str, num_results: int = 5) -> Dict[str, Any]:
         """SerpAPI를 사용한 웹 검색 (2025년 최신 정보 강화)"""
         start_time = datetime.now()
         
         try:
-            # 2025년 최신 정보를 위한 쿼리 강화
-            enhanced_query = self.enhance_query_for_2025(query)
-            
-            # 캐시 확인 (원본 쿼리로)
-            query_hash = self._get_query_hash(query)
-            if query_hash in self.cache and datetime.now() < self.cache_expiry[query_hash]:
-                logger.info(f"캐시에서 검색 결과 반환: {query}")
-                return self.cache[query_hash]
-            
-            # SerpAPI 검색 (강화된 쿼리 사용)
-            search_params = {
-                "q": enhanced_query,
-                "api_key": self.serpapi_key,
-                "engine": "google",
-                "num": num_results,
-                "hl": "ko",  # 한국어
-                "gl": "kr",   # 한국 지역
-                "tbs": "qdr:y"  # 최근 1년 내 결과 우선
-            }
-            
-            search = GoogleSearch(search_params)
-            results = search.get_dict()
-            
+            async with aiohttp.ClientSession() as session:
+                # 쿼리 강화
+                enhanced_query = self.enhance_query_for_2025(query)
+                
+                # 캐시 확인 (원본 쿼리로)
+                query_hash = self._get_query_hash(query)
+                expiry_time = self.cache_expiry.get(query_hash, datetime.min)
+                if query_hash in self.cache and datetime.now() < expiry_time:
+                    logger.info(f"캐시에서 검색 결과 반환: {query}")
+                    return self.cache[query_hash]
+                
+                # SerpAPI 검색 (강화된 쿼리 사용)
+                search_params: Dict[str, Any] = {
+                    "api_key": self.serpapi_key,
+                    "engine": "google",
+                    "q": enhanced_query,
+                    "hl": "ko",  # 한국어
+                    "gl": "kr",   # 한국 지역
+                    "tbs": "qdr:y",  # 최근 1년 내 결과 우선
+                    "num": str(num_results)
+                }
+                
+                search = GoogleSearch(search_params)
+                loop = asyncio.get_event_loop()
+                raw_results = await loop.run_in_executor(None, search.get_dict)
+                
             # 결과 처리
-            processed_results = self._process_search_results(results)
+            processed_results = self._process_search_results(raw_results)
             
             # 캐시에 저장
             self._clean_cache()
@@ -199,51 +202,54 @@ class IntelligentWebSearcher:
                 'timestamp': datetime.now().isoformat()
             }
     
-    def _process_search_results(self, raw_results: Dict) -> Dict:
+    def _process_search_results(self, raw_results: Dict[str, Any]) -> Dict[str, Any]:
         """검색 결과 처리 및 정리"""
-        processed = {
+        processed: Dict[str, Any] = {
             'results': [],
             'answer_box': None,
             'knowledge_graph': None,
-            'related_questions': [],
-            'timestamp': datetime.now().isoformat()
+            'related_questions': []
         }
         
         # 일반 검색 결과
-        if 'organic_results' in raw_results:
-            for result in raw_results['organic_results'][:5]:
-                processed['results'].append({
-                    'title': result.get('title', ''),
-                    'link': result.get('link', ''),
-                    'snippet': result.get('snippet', ''),
-                    'position': result.get('position', 0)
-                })
+        organic_results = raw_results.get('organic_results', [])
+        if isinstance(organic_results, list):
+            for result in organic_results[:5]:
+                if isinstance(result, dict):
+                    processed['results'].append({
+                        'title': str(result.get('title', '')),
+                        'link': str(result.get('link', '')),
+                        'snippet': str(result.get('snippet', '')),
+                        'position': int(result.get('position', 0))
+                    })
         
         # 답변 박스 (즉시 답변)
-        if 'answer_box' in raw_results:
-            answer_box = raw_results['answer_box']
+        answer_box_data = raw_results.get('answer_box')
+        if isinstance(answer_box_data, dict):
             processed['answer_box'] = {
-                'answer': answer_box.get('answer', ''),
-                'title': answer_box.get('title', ''),
-                'link': answer_box.get('link', '')
+                'answer': str(answer_box_data.get('answer', '')),
+                'title': str(answer_box_data.get('title', '')),
+                'link': str(answer_box_data.get('link', ''))
             }
         
         # 지식 그래프
-        if 'knowledge_graph' in raw_results:
-            kg = raw_results['knowledge_graph']
+        kg_data = raw_results.get('knowledge_graph')
+        if isinstance(kg_data, dict):
             processed['knowledge_graph'] = {
-                'title': kg.get('title', ''),
-                'description': kg.get('description', ''),
-                'attributes': kg.get('attributes', {})
+                'title': str(kg_data.get('title', '')),
+                'description': str(kg_data.get('description', '')),
+                'attributes': cast(Dict[str, Any], kg_data.get('attributes', {}))
             }
         
         # 관련 질문
-        if 'related_questions' in raw_results:
-            for rq in raw_results['related_questions'][:3]:
-                processed['related_questions'].append({
-                    'question': rq.get('question', ''),
-                    'snippet': rq.get('snippet', '')
-                })
+        related_questions_data = raw_results.get('related_questions', [])
+        if isinstance(related_questions_data, list):
+            for rq_item in related_questions_data[:3]:
+                if isinstance(rq_item, dict):
+                    processed['related_questions'].append({
+                        'question': str(rq_item.get('question', '')),
+                        'snippet': str(rq_item.get('snippet', ''))
+                    })
         
         return processed
     
@@ -275,39 +281,45 @@ class IntelligentWebSearcher:
         
         return enhanced_query
     
-    async def generate_summary(self, search_results: Dict, query: str) -> str:
+    async def generate_summary(self, search_results: Dict[str, Any], query: str) -> str:
         """검색 결과를 바탕으로 요약 생성"""
         try:
-            summary_parts = []
+            summary_parts: List[str] = []
             
             # 답변 박스가 있으면 우선 사용
-            if search_results.get('answer_box'):
-                answer = search_results['answer_box'].get('answer', '')
+            answer_box = search_results.get('answer_box')
+            if isinstance(answer_box, dict):
+                answer = str(answer_box.get('answer', ''))
                 if answer:
                     summary_parts.append(f"📋 바로 답변드릴게요: {answer}")
             
             # 지식 그래프 정보
-            if search_results.get('knowledge_graph'):
-                kg = search_results['knowledge_graph']
-                if kg.get('description'):
-                    summary_parts.append(f"📚 간단히 설명하면: {kg['description']}")
+            knowledge_graph = search_results.get('knowledge_graph')
+            if isinstance(knowledge_graph, dict):
+                description = str(knowledge_graph.get('description', ''))
+                if description:
+                    summary_parts.append(f"📚 간단히 설명하면: {description}")
             
             # 주요 검색 결과 요약
-            if search_results.get('results'):
+            results = search_results.get('results')
+            if isinstance(results, list) and results:
                 summary_parts.append("🔍 찾아본 주요 내용들:")
-                for i, result in enumerate(search_results['results'][:3], 1):
-                    title = result.get('title', '')
-                    snippet = result.get('snippet', '')
-                    if title and snippet:
-                        summary_parts.append(f"{i}. **{title}**\n   {snippet[:150]}...")
+                for i, result in enumerate(results[:3], 1):
+                    if isinstance(result, dict):
+                        title = str(result.get('title', ''))
+                        snippet = str(result.get('snippet', ''))
+                        if title and snippet:
+                            summary_parts.append(f"{i}. **{title}**\n   {snippet[:150]}...")
             
             # 관련 질문
-            if search_results.get('related_questions'):
+            related_questions = search_results.get('related_questions')
+            if isinstance(related_questions, list) and related_questions:
                 summary_parts.append("\n❓ 이런 것도 궁금하실 것 같아요:")
-                for rq in search_results['related_questions']:
-                    question = rq.get('question', '')
-                    if question:
-                        summary_parts.append(f"• {question}")
+                for rq in related_questions:
+                    if isinstance(rq, dict):
+                        question = str(rq.get('question', ''))
+                        if question:
+                            summary_parts.append(f"• {question}")
             
             return "\n\n".join(summary_parts) if summary_parts else "어라? 검색 결과를 요약하기가 어려워요... 😅"
             
@@ -315,12 +327,12 @@ class IntelligentWebSearcher:
             logger.error(f"요약 생성 오류: {e}")
             return "요약 생성 중 오류가 발생했습니다."
     
-    async def save_search_to_memory(self, query: str, search_results: Dict, summary: str):
+    async def save_search_to_memory(self, query: str, search_results: Dict[str, Any], summary: str):
         """검색 결과를 장기 기억에 저장"""
         try:
             # 쿼리 임베딩 생성
-            query_embedding = self.encoder.encode([query])[0]
-            query_embedding = query_embedding / np.linalg.norm(query_embedding)  # 정규화
+            query_embedding_unnormalized = self.encoder.encode([query])[0]
+            query_embedding: NDArray[np.float32] = query_embedding_unnormalized / np.linalg.norm(query_embedding_unnormalized)  # 정규화
             
             # 데이터베이스에 저장
             query_hash = self._get_query_hash(query)
@@ -341,37 +353,28 @@ class IntelligentWebSearcher:
                 ))
                 await db.commit()
             
-            # 메모리에도 추가
-            self.search_memory.append({
-                'query': query,
-                'results': search_results,
-                'summary': summary,
-                'date': datetime.now().isoformat(),
-                'relevance_score': 1.0
-            })
-            
             # FAISS 인덱스에 추가
-            self.index.add(query_embedding.reshape(1, -1).astype('float32'))
+            self.index.add(query_embedding.reshape(1, -1).astype('float32'))  # type: ignore
             
             logger.info(f"검색 결과 저장 완료: {query} (이제 기억해뒀어요! 💾)")
             
         except Exception as e:
             logger.error(f"검색 결과 저장 오류: {e}")
     
-    async def find_related_memory(self, query: str, top_k: int = 3, similarity_threshold: float = 0.7) -> List[Dict]:
+    async def find_related_memory(self, query: str, top_k: int = 3, similarity_threshold: float = 0.7) -> List[Dict[str, Any]]:
         """관련된 과거 검색 기록 찾기"""
         try:
-            if len(self.search_memory) == 0:
+            if self.index.ntotal == 0:
                 return []
             
             # 쿼리 임베딩 생성
-            query_embedding = self.encoder.encode([query])[0]
-            query_embedding = query_embedding / np.linalg.norm(query_embedding)
+            query_embedding_unnormalized = self.encoder.encode([query])[0]
+            query_embedding: NDArray[np.float32] = query_embedding_unnormalized / np.linalg.norm(query_embedding_unnormalized)
             
             # FAISS로 유사한 검색 찾기
-            scores, indices = self.index.search(
+            scores, indices = self.index.search(  # type: ignore
                 query_embedding.reshape(1, -1).astype('float32'), 
-                min(top_k, len(self.search_memory))
+                min(top_k, self.index.ntotal)
             )
             
             related_memories = []
@@ -387,7 +390,7 @@ class IntelligentWebSearcher:
             logger.error(f"관련 기억 검색 오류: {e}")
             return []
     
-    async def intelligent_search(self, query: str) -> Dict:
+    async def intelligent_search(self, query: str) -> Dict[str, Any]:
         """지능형 검색 - 기억 확인 후 필요시 새로 검색"""
         try:
             # 1. 관련된 과거 검색 기록 확인
@@ -397,19 +400,28 @@ class IntelligentWebSearcher:
             if related_memories:
                 recent_memory = related_memories[0]
                 # 24시간 이내의 검색이면 재사용
-                memory_date = datetime.fromisoformat(recent_memory['date'].replace('Z', '+00:00').replace('+00:00', ''))
-                if datetime.now() - memory_date < timedelta(hours=24):
-                    logger.info(f"기존 검색 기록 활용: {query} (아! 이거 전에 찾아봤던 거네요~)")
-                    return {
-                        'type': 'memory_based',
-                        'query': query,
-                        'answer': recent_memory['summary'],
-                        'source': 'previous_search',
-                        'similarity_score': recent_memory['similarity_score'],
-                        'original_query': recent_memory['query'],
-                        'search_date': recent_memory['date']
-                    }
-            
+                memory_date_str = recent_memory.get('date', '')
+                if memory_date_str:
+                    try:
+                        # 타임존 정보가 없는 경우 UTC로 간주
+                        memory_date = datetime.fromisoformat(memory_date_str.replace('Z', '+00:00'))
+                        if memory_date.tzinfo is None:
+                            memory_date = memory_date.replace(tzinfo=timezone.utc)
+                            
+                        if datetime.now(timezone.utc) - memory_date < timedelta(hours=24):
+                            logger.info(f"기존 검색 기록 활용: {query} (아! 이거 전에 찾아봤던 거네요~)")
+                            return {
+                                'type': 'memory_based',
+                                'query': query,
+                                'answer': recent_memory.get('summary', ''),
+                                'source': 'previous_search',
+                                'similarity_score': recent_memory.get('similarity_score', 0.0),
+                                'original_query': recent_memory.get('query', ''),
+                                'search_date': memory_date_str
+                            }
+                    except ValueError:
+                        logger.warning(f"잘못된 날짜 형식: {memory_date_str}")
+
             # 3. 새로운 검색 수행
             logger.info(f"새로운 웹 검색 수행: {query} (새로 찾아볼게요! 🔍)")
             search_results = await self.search_web(query)
@@ -492,28 +504,54 @@ class IntelligentWebSearcher:
             return {}
 
 # 전역 인스턴스
-web_searcher = None
+_web_searcher_instance: Optional[IntelligentWebSearcher] = None
 
-async def initialize_web_search(serpapi_key: str = "YOUR_SERPAPI_KEY_HERE"):
-    """웹 검색 시스템 초기화"""
-    global web_searcher
-    web_searcher = IntelligentWebSearcher(serpapi_key)
-    await web_searcher.initialize()
-    return web_searcher
+async def initialize_web_search(serpapi_key: str):
+    """
+    지능형 웹 검색 시스템을 초기화합니다.
+    SerpAPI 키가 필요합니다.
+    """
+    global _web_searcher_instance
+    if _web_searcher_instance is None:
+        if not serpapi_key:
+            logger.error("SerpAPI 키가 제공되지 않아 지능형 웹 검색 시스템을 초기화할 수 없습니다.")
+            return
+        _web_searcher_instance = IntelligentWebSearcher(serpapi_key=serpapi_key)
+        await _web_searcher_instance.initialize()
+    logger.info("지능형 웹 검색 시스템이 성공적으로 초기화되었습니다.")
 
-async def search_and_remember(query: str) -> Dict:
-    """검색하고 기억하는 메인 함수"""
-    if web_searcher is None:
+# 호환성을 위한 별칭
+async def initialize_intelligent_search(serpapi_key: str):
+    """initialize_web_search의 별칭 (호환성 유지)"""
+    await initialize_web_search(serpapi_key)
+
+async def search_and_remember(query: str) -> Dict[str, Any]:
+    """
+    지능형 검색을 수행합니다.
+    과거 검색 기록을 확인하고, 필요시 새로운 검색을 수행하여 결과를 기억합니다.
+    """
+    if _web_searcher_instance is None:
+        logger.warning("웹 검색 시스템이 초기화되지 않았습니다. 먼저 initialize_web_search를 호출해주세요.")
         return {
             'type': 'error',
-            'error': '웹 검색 시스템이 초기화되지 않았습니다.'
+            'query': query,
+            'error': 'Web search system is not initialized. SERPAPI_KEY might be missing.'
         }
     
-    return await web_searcher.intelligent_search(query)
+    return await _web_searcher_instance.intelligent_search(query)
 
-async def get_search_statistics() -> Dict:
-    """검색 통계 조회"""
-    if web_searcher is None:
+async def get_search_statistics() -> Dict[str, Any]:
+    """
+    웹 검색 시스템의 통계 정보를 반환합니다.
+    """
+    if _web_searcher_instance is None:
+        logger.warning("웹 검색 시스템이 초기화되지 않아 통계를 가져올 수 없습니다.")
         return {}
-    
-    return await web_searcher.get_search_stats()
+        
+    return await _web_searcher_instance.get_search_stats()
+
+# 호환성을 위한 더미 함수
+async def process_and_learn(data: str) -> str:
+    """호환성을 위한 더미 함수"""
+    logger.warning("process_and_learn 함수는 더 이상 사용되지 않습니다. get_smart_answer를 사용하세요.")
+    return "이 기능은 현재 사용할 수 없습니다."

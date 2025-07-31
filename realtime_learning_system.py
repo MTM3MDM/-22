@@ -15,12 +15,15 @@ from typing import List, Dict, Optional, Any
 import aiohttp
 import aiosqlite
 import numpy as np
+from numpy.typing import NDArray
 from sentence_transformers import SentenceTransformer
-import faiss
-from serpapi import GoogleSearch
-import feedparser
+import faiss  # type: ignore
+from serpapi import GoogleSearch  # type: ignore
+import feedparser  # type: ignore
 import openai
 from dataclasses import dataclass
+from typing import Coroutine, cast
+import time
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -63,7 +66,7 @@ class MultiModelAnalyzer:
     
     async def analyze_with_multiple_models(self, content: str, task: str) -> Dict[str, str]:
         """여러 모델로 동시에 분석"""
-        results = {}
+        results: Dict[str, str] = {}
         
         # 각 모델별 프롬프트 최적화
         prompts = {
@@ -78,20 +81,21 @@ class MultiModelAnalyzer:
         import random
         selected_models = random.sample(list(self.models.items()), min(2, len(self.models)))
         
-        tasks = []
+        tasks: List[Coroutine[Any, Any, str]] = []
         for model_name, model_id in selected_models:
             if model_name in prompts:
-                task = self._query_model(model_id, prompts[model_name], model_name)
-                tasks.append(task)
+                query_task = self._query_model(model_id, prompts[model_name], model_name)
+                tasks.append(query_task)
         
         # 결과 수집
         responses = await asyncio.gather(*tasks, return_exceptions=True)
         
         for i, (model_name, _) in enumerate(selected_models):
-            if i < len(responses) and not isinstance(responses[i], Exception):
-                results[model_name] = responses[i]
+            response_item = responses[i]
+            if isinstance(response_item, str):
+                results[model_name] = response_item
             else:
-                logger.warning(f"{model_name} 모델 분석 실패")
+                logger.warning(f"{model_name} 모델 분석 실패: {response_item}")
         
         return results
     
@@ -107,7 +111,8 @@ class MultiModelAnalyzer:
                 max_tokens=500,
                 temperature=0.3
             )
-            return response.choices[0].message.content
+            content = response.choices[0].message.content
+            return content if content else ""
         except Exception as e:
             logger.error(f"{model_name} 모델 쿼리 오류: {e}")
             return ""
@@ -146,25 +151,26 @@ class MultiModelAnalyzer:
             synthesis = response.choices[0].message.content
             
             # 결과 파싱 (간단한 파싱)
-            lines = synthesis.split('\n')
             summary = ""
-            keywords = []
+            keywords: List[str] = []
             category = "기술"
             confidence = 7.0
-            
-            for line in lines:
-                if "요약" in line or "핵심" in line:
-                    summary = line.split(':', 1)[-1].strip()
-                elif "키워드" in line:
-                    keyword_text = line.split(':', 1)[-1].strip()
-                    keywords = [k.strip() for k in keyword_text.split(',')]
-                elif "카테고리" in line:
-                    category = line.split(':', 1)[-1].strip()
-                elif "중요도" in line:
-                    try:
-                        confidence = float(line.split(':', 1)[-1].strip().split()[0])
-                    except:
-                        confidence = 7.0
+
+            if synthesis:
+                lines = synthesis.split('\n')
+                for line in lines:
+                    if "요약" in line or "핵심" in line:
+                        summary = line.split(':', 1)[-1].strip()
+                    elif "키워드" in line:
+                        keyword_text = line.split(':', 1)[-1].strip()
+                        keywords = [k.strip() for k in keyword_text.split(',')]
+                    elif "카테고리" in line:
+                        category = line.split(':', 1)[-1].strip()
+                    elif "중요도" in line:
+                        try:
+                            confidence = float(line.split(':', 1)[-1].strip().split()[0])
+                        except (ValueError, IndexError):
+                            confidence = 7.0
             
             return LearnedInfo(
                 title=original_content[:100] + "...",
@@ -209,7 +215,7 @@ class RealtimeLearningSystem:
         # FAISS 벡터 인덱스
         self.dimension = 384
         self.index = faiss.IndexFlatIP(self.dimension)
-        self.learned_info = []  # 학습된 정보 메타데이터
+        self.learned_info: List[LearnedInfo] = []  # 학습된 정보 메타데이터
         
         # 학습 소스들 (API 사용량 절약)
         self.learning_sources = {
@@ -264,7 +270,7 @@ class RealtimeLearningSystem:
             async with db.execute('SELECT * FROM learned_info ORDER BY timestamp DESC LIMIT 1000') as cursor:
                 rows = await cursor.fetchall()
                 
-                embeddings = []
+                embeddings: List[NDArray[np.float32]] = []
                 for row in rows:
                     info = LearnedInfo(
                         title=row[1],
@@ -281,13 +287,13 @@ class RealtimeLearningSystem:
                     
                     # 임베딩 로드
                     if row[10]:
-                        embedding = np.frombuffer(row[10], dtype=np.float32)
+                        embedding: NDArray[np.float32] = np.frombuffer(row[10], dtype=np.float32)
                         embeddings.append(embedding)
                 
                 # FAISS 인덱스 구성
                 if embeddings:
-                    embeddings_array = np.array(embeddings)
-                    self.index.add(embeddings_array)
+                    embeddings_array: NDArray[np.float32] = np.array(embeddings)
+                    self.index.add(embeddings_array) # type: ignore
                 
                 logger.info(f"학습된 정보 {len(self.learned_info)}개 로드 완료")
     
@@ -342,7 +348,7 @@ class RealtimeLearningSystem:
         """웹 검색을 통한 학습"""
         try:
             # SerpAPI 검색
-            search_params = {
+            search_params: Dict[str, Any] = {
                 "q": f"{query} 2025",
                 "api_key": self.serpapi_key,
                 "engine": "google",
@@ -355,13 +361,13 @@ class RealtimeLearningSystem:
             search = GoogleSearch(search_params)
             results = search.get_dict()
             
-            learned_items = []
+            learned_items: List[LearnedInfo] = []
             
             if 'organic_results' in results:
                 for result in results['organic_results'][:2]:  # 상위 2개만 (API 절약)
-                    title = result.get('title', '')
-                    snippet = result.get('snippet', '')
-                    link = result.get('link', '')
+                    title = str(result.get('title', ''))
+                    snippet = str(result.get('snippet', ''))
+                    link = str(result.get('link', ''))
                     
                     # 중복 체크
                     if await self.is_duplicate_content(title, snippet):
@@ -391,42 +397,52 @@ class RealtimeLearningSystem:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(rss_url) as response:
-                    if response.status == 200:
-                        content = await response.text()
-                        feed = feedparser.parse(content)
+                    if response.status != 200:
+                        logger.warning(f"RSS 피드를 가져오지 못했습니다: {rss_url} (상태 코드: {response.status})")
+                        return []
+
+                    content = await response.text()
+                    feed = feedparser.parse(content)
+                    
+                    learned_items: List[LearnedInfo] = []
+                    
+                    if not hasattr(feed, 'entries'):
+                        return []
+
+                    for entry in feed.entries[:2]:  # 최신 2개만 (API 절약)
+                        title = str(entry.get('title', ''))
+                        summary = str(entry.get('summary', ''))
+                        link = str(entry.get('link', ''))
                         
-                        learned_items = []
+                        # 중복 체크
+                        if await self.is_duplicate_content(title, summary):
+                            continue
                         
-                        for entry in feed.entries[:2]:  # 최신 2개만 (API 절약)
-                            title = entry.get('title', '')
-                            summary = entry.get('summary', '')
-                            link = entry.get('link', '')
-                            
-                            # 중복 체크
-                            if await self.is_duplicate_content(title, summary):
+                        # 최근 정보인지 확인 (1주일 이내)
+                        pub_date_struct = entry.get('published_parsed')
+                        if isinstance(pub_date_struct, time.struct_time):
+                            pub_datetime = datetime.fromtimestamp(time.mktime(pub_date_struct))
+                            if (datetime.now() - pub_datetime).days > 7:
                                 continue
-                            
-                            # 최근 정보인지 확인 (1주일 이내)
-                            pub_date = entry.get('published_parsed')
-                            if pub_date:
-                                pub_datetime = datetime(*pub_date[:6])
-                                if (datetime.now() - pub_datetime).days > 7:
-                                    continue
-                            
-                            # 다중 모델 분석
-                            content = f"제목: {title}\n내용: {summary}"
-                            analysis_results = await self.analyzer.analyze_with_multiple_models(content, "analyze")
-                            
-                            # 종합 분석
-                            learned_info = await self.analyzer.synthesize_analysis(analysis_results, content)
-                            learned_info.url = link
-                            learned_info.source = f"RSS: {rss_url}"
-                            
-                            # 저장
-                            await self.save_learned_info(learned_info)
-                            learned_items.append(learned_info)
                         
-                        return learned_items
+                        # 다중 모델 분석
+                        content_to_analyze = f"제목: {title}\n내용: {summary}"
+                        analysis_results = await self.analyzer.analyze_with_multiple_models(content_to_analyze, "analyze")
+                        
+                        # 종합 분석
+                        learned_info = await self.analyzer.synthesize_analysis(analysis_results, content_to_analyze)
+                        learned_info.url = link
+                        
+                        feed_title = rss_url
+                        if hasattr(feed, 'feed') and hasattr(feed.feed, 'get') and callable(feed.feed.get):
+                            feed_title = str(feed.feed.get('title', rss_url))
+                        learned_info.source = f"RSS: {feed_title}"
+                        
+                        # 저장
+                        await self.save_learned_info(learned_info)
+                        learned_items.append(learned_info)
+                    
+                    return learned_items
         
         except Exception as e:
             logger.error(f"RSS 학습 오류: {e}")
@@ -451,7 +467,7 @@ class RealtimeLearningSystem:
         try:
             # 임베딩 생성
             text_for_embedding = f"{info.title} {info.summary}"
-            embedding = self.encoder.encode([text_for_embedding])[0]
+            embedding: NDArray[np.float32] = self.encoder.encode([text_for_embedding])[0] # type: ignore
             
             # 데이터베이스 저장
             async with aiosqlite.connect(self.db_path) as db:
@@ -477,7 +493,7 @@ class RealtimeLearningSystem:
             self.learned_info.append(info)
             
             # FAISS 인덱스에 추가
-            self.index.add(np.array([embedding]))
+            self.index.add(np.array([embedding])) # type: ignore
             
             logger.info(f"새로운 정보 학습 완료: {info.title[:50]}...")
             
@@ -488,14 +504,15 @@ class RealtimeLearningSystem:
         """학습된 정보에서 관련 내용 검색"""
         try:
             # 질문 임베딩
-            question_embedding = self.encoder.encode([question])[0]
+            question_embedding: NDArray[np.float32] = self.encoder.encode([question])[0] # type: ignore
             
             # FAISS 검색
             if self.index.ntotal > 0:
-                scores, indices = self.index.search(np.array([question_embedding]), top_k)
+                scores, indices = self.index.search(np.array([question_embedding]), top_k) # type: ignore
                 
                 results = []
-                for i, (score, idx) in enumerate(zip(scores[0], indices[0])):
+                # type: ignore 다음 라인의 타입 오류 무시
+                for i, (score, idx) in enumerate(zip(scores[0], indices[0])): # type: ignore
                     if idx < len(self.learned_info) and score > 0.3:  # 유사도 임계값
                         info = self.learned_info[idx]
                         info.confidence = float(score)  # 검색 점수로 업데이트
@@ -536,34 +553,59 @@ class RealtimeLearningSystem:
             logger.error(f"최신 정보 조회 오류: {e}")
             return "정보 조회 중 오류가 발생했어요."
 
-# 전역 학습 시스템 인스턴스
-learning_system = None
+# --- 모듈 API ---
+# 이 시스템의 공개 인터페이스입니다. 다른 모듈에서는 이 함수들을 사용합니다.
+
+_learning_system_instance: Optional[RealtimeLearningSystem] = None
 
 async def initialize_learning_system():
-    """학습 시스템 초기화"""
-    global learning_system
+    """
+    실시간 학습 시스템을 초기화하고 백그라운드 학습을 시작합니다.
+    """
+    global _learning_system_instance
     
-    openrouter_key = os.getenv('OPENROUTER_API_KEY')
-    serpapi_key = os.getenv('SERPAPI_KEY')
-    
-    if not openrouter_key or not serpapi_key:
-        logger.error("OpenRouter 또는 SerpAPI 키가 설정되지 않았습니다")
-        return None
-    
-    learning_system = RealtimeLearningSystem(openrouter_key, serpapi_key)
-    await learning_system.initialize()
-    
-    # 백그라운드에서 지속적 학습 시작
-    asyncio.create_task(learning_system.start_continuous_learning())
-    
-    logger.info("실시간 학습 시스템 가동 시작!")
-    return learning_system
+    if _learning_system_instance is None:
+        openrouter_key = os.getenv('OPENROUTER_API_KEY')
+        serpapi_key = os.getenv('SERPAPI_KEY')
+        
+        if not openrouter_key or not serpapi_key:
+            logger.error("OpenRouter 또는 SerpAPI 키가 없어 실시간 학습 시스템을 시작할 수 없습니다.")
+            return
+        
+        _learning_system_instance = RealtimeLearningSystem(openrouter_key, serpapi_key)
+        await _learning_system_instance.initialize()
+        
+        # 백그라운드에서 지속적 학습 시작
+        asyncio.create_task(_learning_system_instance.start_continuous_learning())
+        
+        logger.info("실시간 학습 시스템이 성공적으로 초기화되고 백그라운드 학습을 시작했습니다.")
 
 async def get_smart_answer(question: str) -> str:
-    """스마트 답변 생성 (학습된 정보 기반)"""
-    global learning_system
+    """
+    학습된 정보를 기반으로 질문에 대한 스마트한 답변을 생성합니다.
+    """
+    if _learning_system_instance is None:
+        logger.warning("학습 시스템이 초기화되지 않았습니다. 먼저 initialize_learning_system을 호출해주세요.")
+        return "학습 시스템이 아직 준비되지 않았어요. 잠시 후 다시 시도해주세요."
     
-    if not learning_system:
-        return "학습 시스템이 아직 초기화되지 않았어요."
-    
-    return await learning_system.get_latest_info_about(question)
+    return await _learning_system_instance.get_latest_info_about(question)
+
+async def add_feedback_to_learning(feedback_data: Dict[str, Any]):
+    """
+    사용자 피드백을 학습 시스템에 추가합니다. (향후 구현)
+    - 예: "이 답변이 유용했어요" 또는 "이 정보는 틀렸어요"
+    """
+    if _learning_system_instance is None:
+        logger.warning("학습 시스템이 초기화되지 않아 피드백을 추가할 수 없습니다.")
+        return
+
+    # TODO: 피드백을 처리하여 기존 정보의 신뢰도를 조정하거나 새로운 학습 소스를 추가하는 로직 구현
+    logger.info(f"피드백 수신: {feedback_data}")
+    # 예: await _learning_system_instance.process_feedback(feedback_data)
+    pass
+
+# 호환성을 위한 더미 함수
+async def process_and_learn(data: str) -> str:
+    """호환성을 위한 더미 함수"""
+    logger.warning("process_and_learn 함수는 더 이상 사용되지 않습니다. get_smart_answer를 사용하세요.")
+    return "이 기능은 현재 사용할 수 없습니다."

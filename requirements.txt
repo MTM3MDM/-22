@@ -1,125 +1,82 @@
-# 루시아 봇 의존성 - 고급 자연어 AI 어시스턴트
-# 완전 업그레이드된 디스코드 봇을 위한 전체 의존성
+# -- 루시아 AI 디스코드 봇 의존성 --
+# 이 파일은 봇을 실행하는 데 필요한 Python 라이브러리를 정의합니다.
+# pip install -r requirements.txt 명령으로 모든 의존성을 설치할 수 있습니다.
 
-# 핵심 라이브러리
-discord.py>=2.4.0
-google-generativeai>=0.8.0
-python-dotenv>=1.0.0
+# --- 1. 핵심 의존성 (봇 실행에 필수) ---
+# 봇의 기본 기능을 위해 반드시 필요합니다.
+discord.py>=2.4.0              # Discord API와 상호작용
+google-generativeai>=0.8.0     # Google Gemini AI 모델 사용
+python-dotenv>=1.0.0           # .env 파일에서 환경 변수 로드
+aiosqlite>=0.20.0              # 비동기 SQLite 데이터베이스 접근
 
-# 데이터베이스 및 영구 저장
-aiosqlite>=0.20.0
-sqlalchemy>=2.0.0
-alembic>=1.13.0
+# --- 2. 고급 기능 의존성 ---
+# 웹 검색, 지식 베이스, 실시간 학습 등 고급 기능에 필요합니다.
+google-search-results>=2.4.2   # SerpAPI를 통한 구글 검색 결과
+requests>=2.31.0               # 동기 HTTP 요청
+aiohttp>=3.9.0                 # 비동기 HTTP 요청
+beautifulsoup4>=4.12.0         # HTML 및 XML 파싱
+faiss-cpu>=1.7.4               # 벡터 검색 (CPU 버전)
+langchain>=0.1.0               # LLM 애플리케이션 구축 프레임워크
+langchain-community>=0.0.10    # LangChain 커뮤니티 확장
+feedparser>=6.0.10             # RSS 및 Atom 피드 파싱 (기술 뉴스)
+numpy>=1.24.0                  # FAISS 및 기타 과학 계산에 필요
 
-# 웹 스크래핑 및 HTTP 요청
-aiohttp>=3.9.0
-beautifulsoup4>=4.12.0
-requests>=2.31.0
-selenium>=4.15.0
+# --- 3. 멀티모달 및 데이터 처리 의존성 (선택적 기능) ---
+# gemini_discord_bot.py에 포함된 추가 기능들입니다.
+# 일부 기능은 현재 비활성화 상태일 수 있습니다.
+Pillow>=10.1.0                 # 이미지 처리
+opencv-python>=4.8.0           # 컴퓨터 비전 (이미지 분석)
+matplotlib>=3.8.0              # 데이터 시각화 및 그래프 생성
+pandas>=2.1.0                  # 데이터 분석 및 조작
+seaborn>=0.13.0                # 통계 데이터 시각화
+wordcloud>=1.9.2               # 단어 구름 생성
+plotly>=5.17.0                 # 인터랙티브 그래프 생성
+scikit-learn>=1.3.0            # 머신러닝 도구 (유사도 계산 등)
+nltk>=3.8.0                    # 자연어 처리 툴킷
+transformers>=4.35.0           # 최신 NLP 모델 (Hugging Face)
+torch>=2.1.0                   # Transformers 라이브러리 의존성
+torchvision>=0.16.0            # Torch 비전 라이브러리
+sentence-transformers>=2.2.0   # 문장 임베딩 생성
+openai>=1.0.0                  # OpenAI API (필요시)
+tiktoken>=0.5.0                # OpenAI 모델용 토크나이저
+deep-translator>=1.11.4        # 다국어 번역
+wikipedia>=1.4.0               # 위키피디아 검색
+psutil>=5.9.0                  # 시스템 리소스 모니터링
+apscheduler>=3.10.0            # 비동기 작업 스케줄링
+pytz>=2023.3                   # 시간대 처리
 
-# 자연어 처리 고급 기능
-nltk>=3.8.0
-textblob>=0.17.0
-spacy>=3.7.0
-transformers>=4.35.0
-sentence-transformers>=2.2.0
+# --- 4. 개발 및 코드 분석 도구 ---
+# 런타임에는 필요하지 않지만, 코드 품질 관리에 유용합니다.
+pylint>=3.0.0                  # 코드 스타일 및 오류 검사
 
-# 벡터 검색 및 임베딩
-faiss-cpu>=1.7.4
-chromadb>=0.4.0
-langchain>=0.1.0
-langchain-community>=0.0.10
-openai>=1.0.0
-
-# 뉴스 및 데이터 수집
-feedparser>=6.0.10
-newspaper3k>=0.2.8
-scrapy>=2.11.0
-tweepy>=4.14.0
-
-# 고급 텍스트 처리
-tiktoken>=0.5.0
-unstructured>=0.10.0
-pypdf>=3.17.0
-python-docx>=1.1.0
-
-# 이미지 처리 및 생성 (초고급)
-Pillow>=10.1.0
-opencv-python>=4.8.0
-matplotlib>=3.8.0
-numpy>=1.24.0
-face-recognition>=1.3.0
-pytesseract>=0.3.10
-qrcode>=7.4.2
-
-# 음성 처리 (초고급)
-pydub>=0.25.0
-speech-recognition>=3.10.0
-gtts>=2.4.0
-pyttsx3>=2.90
-pyaudio>=0.2.11
-
-# 웹 검색 및 API
-google-search-results>=2.4.0
-wikipedia>=1.4.0
-youtube-dl>=2021.12.17
-
-# 비동기 처리 및 성능 최적화
-aiofiles>=24.1.0
-asyncio-throttle>=1.0.2
-redis>=5.0.0
-celery>=5.3.0
-
-# 로깅 및 모니터링
-colorlog>=6.8.0
-psutil>=5.9.0
-prometheus-client>=0.19.0
-
-# 보안 강화
-cryptography>=41.0.0
-bcrypt>=4.1.0
-pyjwt>=2.8.0
-
-# 데이터 분석 및 시각화 (초고급)
-pandas>=2.1.0
-plotly>=5.17.0
-seaborn>=0.13.0
-wordcloud>=1.9.2
-scikit-learn>=1.3.0
-
-# 게임 및 엔터테인먼트
-chess>=1.10.0
-python-chess>=1.999
-pygame>=2.5.0
-
-# 번역 및 다국어 지원
-googletrans>=4.0.0
-deep-translator>=1.11.4
-langdetect>=1.0.9
-
-# 코드 분석 및 보안
-bandit>=1.7.5
-pylint>=3.0.0
-mypy>=1.7.0
-radon>=6.0.1
-
-# 스케줄링 및 작업 관리
-apscheduler>=3.10.4
-croniter>=2.0.1
-
-# 고급 웹 스크래핑
-playwright>=1.40.0
-httpx>=0.25.0
-
-# 유틸리티
-python-dateutil>=2.8.0
-pytz>=2023.3
-schedule>=1.2.0
-humanize>=4.8.0
-emoji>=2.8.0
-python-magic>=0.4.27
-
-# 개발 및 테스트 (선택적)
-pytest>=7.4.0
-black>=23.9.0
-flake8>=6.1.0
+# --- 5. 주석 처리된 의존성 ---
+# 현재 코드베이스에서 직접적인 import를 찾을 수 없거나,
+# 비활성화된 기능에 사용되는 라이브러리입니다. 필요시 주석을 해제하세요.
+#
+# sqlalchemy>=2.0.0
+# alembic>=1.13.0
+# selenium>=4.15.0
+# spacy>=3.7.0
+# chromadb>=0.4.0
+# newspaper3k>=0.2.8
+# scrapy>=2.11.0
+# tweepy>=4.14.0
+# unstructured>=0.10.0
+# pypdf>=3.17.0
+# python-docx>=1.1.0
+# face-recognition>=1.3.0
+# pytesseract>=0.3.10
+# qrcode>=7.4.2
+# pydub>=0.25.0
+# speech-recognition>=3.10.0
+# gtts>=2.4.0
+# pyttsx3>=2.90
+# pyaudio>=0.2.11
+# youtube-dl>=2021.12.17
+# aiofiles>=24.1.0
+# redis>=5.0.0
+# celery>=5.3.0
+# colorlog>=6.8.0
+# cryptography>=41.0.0
+# chess>=1.10.0
+# pygame>=2.5.0
